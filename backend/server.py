@@ -17,7 +17,11 @@ import io
 from bs4 import BeautifulSoup
 import re
 import json
+import time
+import random
+from urllib.parse import quote_plus, urljoin
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from groq import Groq
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -33,8 +37,8 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# Initialize LLM Chat
-llm_chat = LlmChat(
+# Initialize LLM providers
+emergent_llm_chat = LlmChat(
     api_key=os.environ.get('EMERGENT_LLM_KEY'),
     session_id="funding_tracker",
     system_message="""You are an expert at analyzing news articles and identifying startup funding announcements. 
@@ -58,6 +62,9 @@ llm_chat = LlmChat(
     Only extract companies that are clearly based in India and have received funding."""
 ).with_model("gemini", "gemini-2.5-pro")
 
+# Initialize Groq client
+groq_client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
+
 # Models
 class NewsSource(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -66,6 +73,7 @@ class NewsSource(BaseModel):
     rss_feed: Optional[str] = None
     css_selectors: Dict[str, str] = Field(default_factory=dict)
     is_active: bool = True
+    source_type: str = "rss"  # rss, search, direct
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class NewsSourceCreate(BaseModel):
@@ -73,6 +81,7 @@ class NewsSourceCreate(BaseModel):
     url: str
     rss_feed: Optional[str] = None
     css_selectors: Dict[str, str] = Field(default_factory=dict)
+    source_type: str = "rss"
 
 class Startup(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -95,18 +104,21 @@ class Startup(BaseModel):
 class ScrapingLog(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source_id: str
+    source_name: str
     status: str  # success, error, no_funding_found
     articles_processed: int = 0
     startups_found: int = 0
     error_message: Optional[str] = None
+    ai_provider_used: str = "unknown"  # emergent, groq, failed
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-# Default news sources
+# Enhanced default sources including Google News
 DEFAULT_SOURCES = [
     {
         "name": "Economic Times Startups",
         "url": "https://economictimes.indiatimes.com/small-biz/startups",
         "rss_feed": "https://economictimes.indiatimes.com/small-biz/startups/rssfeeds/13352306.cms",
+        "source_type": "rss",
         "css_selectors": {
             "title": "h1",
             "content": ".artText",
@@ -117,6 +129,7 @@ DEFAULT_SOURCES = [
         "name": "Inc42",
         "url": "https://inc42.com/buzz/",
         "rss_feed": "https://inc42.com/feed/",
+        "source_type": "rss",
         "css_selectors": {
             "title": "h1",
             "content": ".content-wrapper",
@@ -126,13 +139,131 @@ DEFAULT_SOURCES = [
     {
         "name": "YourStory",
         "url": "https://yourstory.com/funding",
+        "source_type": "direct",
         "css_selectors": {
             "title": "h1",
             "content": ".story-content",
             "date": ".date"
         }
+    },
+    {
+        "name": "Google News - Startup Funding",
+        "url": "https://news.google.com/rss/search?q=Indian+startup+funding&hl=en-IN&gl=IN&ceid=IN:en",
+        "rss_feed": "https://news.google.com/rss/search?q=Indian+startup+funding&hl=en-IN&gl=IN&ceid=IN:en",
+        "source_type": "rss",
+        "css_selectors": {}
+    },
+    {
+        "name": "Google News - Series A India",
+        "url": "https://news.google.com/rss/search?q=Series+A+funding+India+startup&hl=en-IN&gl=IN&ceid=IN:en",
+        "rss_feed": "https://news.google.com/rss/search?q=Series+A+funding+India+startup&hl=en-IN&gl=IN&ceid=IN:en",
+        "source_type": "rss",
+        "css_selectors": {}
+    },
+    {
+        "name": "Google News - Venture Capital India",
+        "url": "https://news.google.com/rss/search?q=venture+capital+India+investment&hl=en-IN&gl=IN&ceid=IN:en",
+        "rss_feed": "https://news.google.com/rss/search?q=venture+capital+India+investment&hl=en-IN&gl=IN&ceid=IN:en",
+        "source_type": "rss",
+        "css_selectors": {}
+    },
+    {
+        "name": "Google Search - Indian Startups",
+        "url": "https://google.com/search",
+        "source_type": "search",
+        "css_selectors": {
+            "results": ".g",
+            "title": "h3",
+            "link": "a",
+            "snippet": ".VwiC3b"
+        }
     }
 ]
+
+# Google search terms for startup funding news
+GOOGLE_SEARCH_TERMS = [
+    "Indian startup funding 2025",
+    "Series A funding India startup",
+    "venture capital investment India",
+    "Indian startup raises funding",
+    "startup funding round India",
+    "Indian unicorn funding",
+    "seed funding Indian startup",
+    "Series B funding India",
+    "Indian startup investment news"
+]
+
+# AI Analysis with dual provider support
+async def analyze_with_ai(content: str, title: str, source_name: str = "") -> Dict[str, Any]:
+    """Analyze article content with AI using both Emergent and Groq as fallback"""
+    prompt = f"""
+    Analyze this Indian news article for startup funding announcements:
+    
+    Title: {title}
+    Content: {content[:3000]}  # Limit content to avoid token limits
+    
+    Extract information about Indian startups that received funding. Return only valid JSON.
+    """
+    
+    # Try Emergent LLM first
+    try:
+        user_message = UserMessage(text=prompt)
+        response = await emergent_llm_chat.send_message(user_message)
+        
+        # Parse JSON response
+        try:
+            result = json.loads(response)
+            result["ai_provider"] = "emergent"
+            return result
+        except json.JSONDecodeError:
+            # Try to extract JSON from response if it's wrapped in text
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                result["ai_provider"] = "emergent"
+                return result
+            raise Exception("Invalid JSON from Emergent")
+            
+    except Exception as e:
+        logger.warning(f"Emergent LLM failed: {str(e)}, trying Groq...")
+        
+        # Fallback to Groq
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.1-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert at analyzing news articles and identifying startup funding announcements. Return only valid JSON with funding information about Indian startups."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=1000
+            )
+            
+            response_text = response.choices[0].message.content
+            
+            # Parse JSON response
+            try:
+                result = json.loads(response_text)
+                result["ai_provider"] = "groq"
+                return result
+            except json.JSONDecodeError:
+                # Try to extract JSON from response
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    result["ai_provider"] = "groq"
+                    return result
+                raise Exception("Invalid JSON from Groq")
+                
+        except Exception as groq_error:
+            logger.error(f"Both AI providers failed. Emergent: {str(e)}, Groq: {str(groq_error)}")
+            return {"is_funding_news": False, "companies": [], "ai_provider": "failed"}
 
 # Web scraping functions
 async def scrape_article_content(session: aiohttp.ClientSession, url: str, selectors: Dict[str, str]) -> Dict[str, Any]:
@@ -155,19 +286,36 @@ async def scrape_article_content(session: aiohttp.ClientSession, url: str, selec
                 }
                 
                 # Extract title
-                if 'title' in selectors:
+                if 'title' in selectors and selectors['title']:
                     title_elem = soup.select_one(selectors['title'])
+                    if title_elem:
+                        article_data['title'] = title_elem.get_text(strip=True)
+                elif not article_data['title']:
+                    # Fallback to page title
+                    title_elem = soup.find('title')
                     if title_elem:
                         article_data['title'] = title_elem.get_text(strip=True)
                 
                 # Extract content
-                if 'content' in selectors:
+                if 'content' in selectors and selectors['content']:
                     content_elem = soup.select_one(selectors['content'])
                     if content_elem:
                         article_data['content'] = content_elem.get_text(strip=True)
+                else:
+                    # Fallback to common content selectors
+                    for selector in ['.article-content', '.content', '.post-content', 'article', '.entry-content']:
+                        content_elem = soup.select_one(selector)
+                        if content_elem and len(content_elem.get_text(strip=True)) > 100:
+                            article_data['content'] = content_elem.get_text(strip=True)
+                            break
+                    
+                    # Last resort: get all paragraph text
+                    if not article_data['content']:
+                        paragraphs = soup.find_all('p')
+                        article_data['content'] = ' '.join([p.get_text(strip=True) for p in paragraphs[:10]])
                 
                 # Extract date
-                if 'date' in selectors:
+                if 'date' in selectors and selectors['date']:
                     date_elem = soup.select_one(selectors['date'])
                     if date_elem:
                         article_data['date'] = date_elem.get_text(strip=True)
@@ -178,35 +326,53 @@ async def scrape_article_content(session: aiohttp.ClientSession, url: str, selec
         logger.error(f"Error scraping {url}: {str(e)}")
         return None
 
-async def analyze_with_ai(content: str, title: str) -> Dict[str, Any]:
-    """Analyze article content with AI to extract funding information"""
+async def google_search_scraping(session: aiohttp.ClientSession, search_term: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """Perform Google search and extract results"""
+    results = []
     try:
-        prompt = f"""
-        Analyze this Indian news article for startup funding announcements:
+        search_url = f"https://www.google.com/search?q={quote_plus(search_term)}&num={max_results}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
         
-        Title: {title}
-        Content: {content[:3000]}  # Limit content to avoid token limits
+        # Add random delay to avoid being blocked
+        await asyncio.sleep(random.uniform(1, 3))
         
-        Extract information about Indian startups that received funding. Return only valid JSON.
-        """
-        
-        user_message = UserMessage(text=prompt)
-        response = await llm_chat.send_message(user_message)
-        
-        # Parse JSON response
-        try:
-            result = json.loads(response)
-            return result
-        except json.JSONDecodeError:
-            # Try to extract JSON from response if it's wrapped in text
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            return {"is_funding_news": False, "companies": []}
-            
+        async with session.get(search_url, headers=headers) as response:
+            if response.status == 200:
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Extract search results
+                for result in soup.select('.g'):
+                    title_elem = result.select_one('h3')
+                    link_elem = result.select_one('a')
+                    snippet_elem = result.select_one('.VwiC3b')
+                    
+                    if title_elem and link_elem:
+                        title = title_elem.get_text(strip=True)
+                        link = link_elem.get('href', '')
+                        snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
+                        
+                        # Filter for relevant startup/funding content
+                        if any(keyword in title.lower() + snippet.lower() for keyword in ['startup', 'funding', 'investment', 'raised', 'series', 'venture']):
+                            results.append({
+                                'title': title,
+                                'url': link,
+                                'snippet': snippet
+                            })
+                
+                logger.info(f"Google search for '{search_term}' returned {len(results)} results")
+                
     except Exception as e:
-        logger.error(f"Error in AI analysis: {str(e)}")
-        return {"is_funding_news": False, "companies": []}
+        logger.error(f"Error in Google search for '{search_term}': {str(e)}")
+    
+    return results
 
 async def enrich_startup_data(company_name: str, session: aiohttp.ClientSession) -> Dict[str, Any]:
     """Enrich startup data by searching for website and social profiles"""
@@ -219,13 +385,20 @@ async def enrich_startup_data(company_name: str, session: aiohttp.ClientSession)
     }
     
     try:
-        # Simple Google search simulation for company website
-        search_query = f"{company_name} startup India website"
-        # This would normally use a search API, for now we'll return placeholder
-        # In production, you'd integrate with Google Custom Search API or similar
+        # Search for company website
+        search_results = await google_search_scraping(session, f"{company_name} startup India website", max_results=5)
         
-        # Placeholder for website detection logic
-        # You would implement actual web search and domain extraction here
+        for result in search_results:
+            url = result.get('url', '')
+            # Look for official website (not news articles)
+            if url.startswith('http') and not any(news_site in url for news_site in ['news', 'article', 'blog', 'post']):
+                # Simple heuristic to find company website
+                if company_name.lower().replace(' ', '') in url.lower():
+                    enriched_data['website'] = url
+                    break
+        
+        # Add delay to avoid rate limiting
+        await asyncio.sleep(random.uniform(1, 2))
         
     except Exception as e:
         logger.error(f"Error enriching data for {company_name}: {str(e)}")
@@ -234,13 +407,19 @@ async def enrich_startup_data(company_name: str, session: aiohttp.ClientSession)
 
 async def scrape_news_source(source: NewsSource) -> ScrapingLog:
     """Scrape a single news source for funding announcements"""
-    log = ScrapingLog(source_id=source.id, status="running")
+    log = ScrapingLog(
+        source_id=source.id, 
+        source_name=source.name,
+        status="running",
+        ai_provider_used="unknown"
+    )
     
     try:
         async with aiohttp.ClientSession() as session:
-            # If RSS feed is available, use it
-            if source.rss_feed:
+            if source.source_type == "rss" and source.rss_feed:
                 await scrape_rss_feed(session, source, log)
+            elif source.source_type == "search":
+                await scrape_google_search(session, source, log)
             else:
                 await scrape_website_directly(session, source, log)
                 
@@ -258,12 +437,16 @@ async def scrape_news_source(source: NewsSource) -> ScrapingLog:
 async def scrape_rss_feed(session: aiohttp.ClientSession, source: NewsSource, log: ScrapingLog):
     """Scrape RSS feed for articles"""
     try:
-        async with session.get(source.rss_feed) as response:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; StartupTracker/1.0; +http://example.com/bot)'
+        }
+        
+        async with session.get(source.rss_feed, headers=headers, timeout=30) as response:
             if response.status == 200:
                 rss_content = await response.text()
                 soup = BeautifulSoup(rss_content, 'xml')
                 
-                items = soup.find_all('item')[:10]  # Limit to recent 10 articles
+                items = soup.find_all('item')[:15]  # Limit to recent 15 articles
                 log.articles_processed = len(items)
                 
                 for item in items:
@@ -271,41 +454,113 @@ async def scrape_rss_feed(session: aiohttp.ClientSession, source: NewsSource, lo
                     link = item.find('link').text if item.find('link') else ""
                     description = item.find('description').text if item.find('description') else ""
                     
-                    if link:
-                        # Scrape full article content
-                        article_data = await scrape_article_content(session, link, source.css_selectors)
-                        if article_data:
-                            # Analyze with AI
-                            analysis = await analyze_with_ai(article_data['content'], article_data['title'])
+                    # Clean Google News URLs
+                    if 'news.google.com' in link and 'url=' in link:
+                        try:
+                            actual_url = link.split('url=')[1].split('&')[0]
+                            from urllib.parse import unquote
+                            link = unquote(actual_url)
+                        except:
+                            pass
+                    
+                    if link and title:
+                        # Check if article seems relevant first
+                        if any(keyword in title.lower() + description.lower() for keyword in ['startup', 'funding', 'investment', 'raised', 'series', 'venture', 'capital']):
                             
-                            if analysis.get('is_funding_news') and analysis.get('companies'):
-                                await process_found_companies(analysis['companies'], link)
-                                log.startups_found += len(analysis['companies'])
+                            # Scrape full article content
+                            article_data = await scrape_article_content(session, link, source.css_selectors)
+                            if article_data and article_data.get('content'):
+                                # Analyze with AI
+                                analysis = await analyze_with_ai(
+                                    article_data['content'], 
+                                    article_data['title'] or title,
+                                    source.name
+                                )
+                                
+                                log.ai_provider_used = analysis.get('ai_provider', 'unknown')
+                                
+                                if analysis.get('is_funding_news') and analysis.get('companies'):
+                                    await process_found_companies(analysis['companies'], link)
+                                    log.startups_found += len(analysis['companies'])
+                            
+                            # Add delay between requests
+                            await asyncio.sleep(random.uniform(0.5, 1.5))
                                 
     except Exception as e:
         raise Exception(f"RSS scraping error: {str(e)}")
 
+async def scrape_google_search(session: aiohttp.ClientSession, source: NewsSource, log: ScrapingLog):
+    """Scrape Google search results for startup funding news"""
+    try:
+        total_startups_found = 0
+        
+        for search_term in GOOGLE_SEARCH_TERMS[:3]:  # Limit to 3 search terms per run
+            search_results = await google_search_scraping(session, search_term, max_results=5)
+            log.articles_processed += len(search_results)
+            
+            for result in search_results:
+                url = result.get('url', '')
+                title = result.get('title', '')
+                snippet = result.get('snippet', '')
+                
+                if url and title:
+                    # Try to scrape the full article
+                    article_data = await scrape_article_content(session, url, {})
+                    
+                    content = article_data.get('content', '') if article_data else snippet
+                    if content:
+                        # Analyze with AI
+                        analysis = await analyze_with_ai(content, title, source.name)
+                        log.ai_provider_used = analysis.get('ai_provider', 'unknown')
+                        
+                        if analysis.get('is_funding_news') and analysis.get('companies'):
+                            await process_found_companies(analysis['companies'], url)
+                            total_startups_found += len(analysis['companies'])
+                    
+                    # Add delay between requests
+                    await asyncio.sleep(random.uniform(1, 2))
+            
+            # Longer delay between search terms
+            await asyncio.sleep(random.uniform(3, 5))
+        
+        log.startups_found = total_startups_found
+        
+    except Exception as e:
+        raise Exception(f"Google search scraping error: {str(e)}")
+
 async def scrape_website_directly(session: aiohttp.ClientSession, source: NewsSource, log: ScrapingLog):
     """Scrape website directly for articles"""
     try:
-        async with session.get(source.url) as response:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        async with session.get(source.url, headers=headers, timeout=30) as response:
             if response.status == 200:
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
                 # Find article links (this would need to be customized per site)
-                article_links = soup.find_all('a', href=True)[:20]  # Limit to 20 links
+                article_links = soup.find_all('a', href=True)[:25]  # Limit to 25 links
                 
                 processed = 0
                 for link in article_links:
                     href = link.get('href')
-                    if href and ('startup' in href.lower() or 'funding' in href.lower()):
+                    link_text = link.get_text(strip=True)
+                    
+                    if href and any(keyword in href.lower() + link_text.lower() for keyword in ['startup', 'funding', 'investment']):
                         if not href.startswith('http'):
-                            href = source.url.rstrip('/') + '/' + href.lstrip('/')
+                            href = urljoin(source.url, href)
                         
                         article_data = await scrape_article_content(session, href, source.css_selectors)
-                        if article_data and article_data['content']:
-                            analysis = await analyze_with_ai(article_data['content'], article_data['title'])
+                        if article_data and article_data.get('content'):
+                            analysis = await analyze_with_ai(
+                                article_data['content'], 
+                                article_data['title'],
+                                source.name
+                            )
+                            
+                            log.ai_provider_used = analysis.get('ai_provider', 'unknown')
                             
                             if analysis.get('is_funding_news') and analysis.get('companies'):
                                 await process_found_companies(analysis['companies'], href)
@@ -314,6 +569,9 @@ async def scrape_website_directly(session: aiohttp.ClientSession, source: NewsSo
                         processed += 1
                         if processed >= 10:  # Limit processing
                             break
+                        
+                        # Add delay between requests
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
                 
                 log.articles_processed = processed
                 
@@ -323,16 +581,20 @@ async def scrape_website_directly(session: aiohttp.ClientSession, source: NewsSo
 async def process_found_companies(companies: List[Dict], source_url: str):
     """Process and save found companies to database"""
     for company_data in companies:
+        company_name = company_data.get('name', '').strip()
+        if not company_name:
+            continue
+            
         # Check if company already exists
-        existing = await db.startups.find_one({"name": company_data.get('name')})
+        existing = await db.startups.find_one({"name": company_name})
         
         if not existing:
             # Enrich company data
             async with aiohttp.ClientSession() as session:
-                enriched = await enrich_startup_data(company_data.get('name', ''), session)
+                enriched = await enrich_startup_data(company_name, session)
             
             startup = Startup(
-                name=company_data.get('name', ''),
+                name=company_name,
                 funding_amount=company_data.get('funding_amount'),
                 funding_stage=company_data.get('funding_stage'),
                 investors=company_data.get('investors', []),
@@ -347,10 +609,30 @@ async def process_found_companies(companies: List[Dict], source_url: str):
             )
             
             await db.startups.insert_one(startup.dict())
+            logger.info(f"Added new startup: {company_name}")
+        else:
+            # Update existing startup with new information
+            update_data = {}
+            if company_data.get('funding_amount') and not existing.get('funding_amount'):
+                update_data['funding_amount'] = company_data.get('funding_amount')
+            if company_data.get('funding_stage') and not existing.get('funding_stage'):
+                update_data['funding_stage'] = company_data.get('funding_stage')
+            if company_data.get('investors'):
+                existing_investors = existing.get('investors', [])
+                new_investors = list(set(existing_investors + company_data.get('investors', [])))
+                update_data['investors'] = new_investors
+            
+            if update_data:
+                update_data['last_updated'] = datetime.now(timezone.utc)
+                await db.startups.update_one(
+                    {"name": company_name},
+                    {"$set": update_data}
+                )
+                logger.info(f"Updated existing startup: {company_name}")
 
 # Background task for periodic scraping
 async def periodic_scraping():
-    """Run periodic scraping every 5 minutes"""
+    """Run periodic scraping every 8 minutes (reduced frequency to avoid rate limits)"""
     while True:
         try:
             logger.info("Starting periodic scraping...")
@@ -363,18 +645,21 @@ async def periodic_scraping():
                 source = NewsSource(**source_data)
                 await scrape_news_source(source)
                 
+                # Add delay between sources to avoid rate limiting
+                await asyncio.sleep(random.uniform(2, 4))
+                
             logger.info("Periodic scraping completed")
             
         except Exception as e:
             logger.error(f"Error in periodic scraping: {str(e)}")
         
-        # Wait 5 minutes
-        await asyncio.sleep(300)
+        # Wait 8 minutes
+        await asyncio.sleep(480)
 
 # API Routes
 @api_router.get("/")
 async def root():
-    return {"message": "Startup Funding Tracker API"}
+    return {"message": "Enhanced Startup Funding Tracker API with Google Integration"}
 
 # News Sources Management
 @api_router.post("/news-sources", response_model=NewsSource)
@@ -475,9 +760,11 @@ async def trigger_manual_scrape(background_tasks: BackgroundTasks):
         for source_data in sources:
             source = NewsSource(**source_data)
             await scrape_news_source(source)
+            # Add delay between sources
+            await asyncio.sleep(random.uniform(2, 4))
     
     background_tasks.add_task(run_scraping)
-    return {"message": "Manual scraping triggered"}
+    return {"message": "Manual scraping triggered with enhanced Google integration"}
 
 # CSV Export
 @api_router.get("/export/csv")
@@ -522,11 +809,30 @@ async def export_startups_csv():
     
     return FileResponse(csv_path, filename="startups_funding_data.csv", media_type="text/csv")
 
-# Scraping logs
+# Enhanced scraping logs
 @api_router.get("/logs", response_model=List[ScrapingLog])
 async def get_scraping_logs(limit: int = 50):
     logs = await db.scraping_logs.find().sort("timestamp", -1).limit(limit).to_list(length=None)
     return [ScrapingLog(**log) for log in logs]
+
+# Health check endpoint
+@api_router.get("/health")
+async def health_check():
+    try:
+        # Test database connection
+        await db.startups.count_documents({})
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
 # Initialize default sources on startup
 @app.on_event("startup")
@@ -540,7 +846,7 @@ async def startup_event():
     
     # Start periodic scraping in background
     asyncio.create_task(periodic_scraping())
-    logger.info("Startup funding tracker initialized")
+    logger.info("Enhanced Startup funding tracker with Google integration initialized")
 
 # Include the router in the main app
 app.include_router(api_router)
