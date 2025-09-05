@@ -813,7 +813,33 @@ async def export_startups_csv():
 @api_router.get("/logs", response_model=List[ScrapingLog])
 async def get_scraping_logs(limit: int = 50):
     logs = await db.scraping_logs.find().sort("timestamp", -1).limit(limit).to_list(length=None)
-    return [ScrapingLog(**log) for log in logs]
+    
+    # Handle logs with missing fields for backward compatibility
+    processed_logs = []
+    for log in logs:
+        # Remove MongoDB _id field
+        if '_id' in log:
+            del log['_id']
+        
+        # Add missing required fields with defaults
+        if 'source_name' not in log:
+            log['source_name'] = 'Unknown Source'
+        if 'id' not in log:
+            log['id'] = str(uuid.uuid4())
+        if 'timestamp' not in log:
+            log['timestamp'] = datetime.now(timezone.utc)
+        if 'status' not in log:
+            log['status'] = 'unknown'
+        if 'source_id' not in log:
+            log['source_id'] = 'unknown'
+        
+        try:
+            processed_logs.append(ScrapingLog(**log))
+        except Exception as e:
+            logger.error(f"Error processing log: {str(e)}, log data: {log}")
+            continue
+    
+    return processed_logs
 
 # Health check endpoint
 @api_router.get("/health")
