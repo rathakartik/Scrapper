@@ -230,7 +230,7 @@ async def analyze_with_ai(content: str, title: str, source_name: str = "") -> Di
         # Fallback to Groq
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {
                         "role": "system",
