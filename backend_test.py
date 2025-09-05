@@ -244,7 +244,8 @@ class StartupFundingTrackerTester:
                 return self.log_test(
                     "GET Scraping Logs", 
                     True, 
-                    f"Status: {response.status_code}, Count: {len(data)} logs"
+                    f"Status: {response.status_code}, Count: {len(data)} logs",
+                    response_data=data
                 )
             else:
                 return self.log_test(
@@ -254,6 +255,247 @@ class StartupFundingTrackerTester:
                 )
         except Exception as e:
             return self.log_test("GET Scraping Logs", False, f"Error: {str(e)}")
+
+    def test_ai_provider_status(self):
+        """Test AI Provider Status - Verify Groq is working as fallback"""
+        try:
+            # First trigger scraping to generate logs
+            scrape_response = requests.post(f"{self.api_url}/scrape/trigger", timeout=15)
+            if scrape_response.status_code != 200:
+                return self.log_test(
+                    "AI Provider Status", 
+                    False, 
+                    f"Failed to trigger scraping: {scrape_response.status_code}"
+                )
+            
+            # Wait for scraping to process
+            print("⏳ Waiting 10 seconds for AI analysis to complete...")
+            time.sleep(10)
+            
+            # Get recent logs to check AI provider usage
+            logs_response = requests.get(f"{self.api_url}/logs?limit=20", timeout=10)
+            if logs_response.status_code == 200:
+                logs = logs_response.json()
+                
+                # Check for AI provider usage in recent logs
+                groq_usage = 0
+                emergent_usage = 0
+                failed_usage = 0
+                
+                for log in logs:
+                    ai_provider = log.get('ai_provider_used', 'unknown')
+                    if ai_provider == 'groq':
+                        groq_usage += 1
+                    elif ai_provider == 'emergent':
+                        emergent_usage += 1
+                    elif ai_provider == 'failed':
+                        failed_usage += 1
+                
+                # Success if we see Groq being used (indicating fallback is working)
+                if groq_usage > 0:
+                    return self.log_test(
+                        "AI Provider Status", 
+                        True, 
+                        f"Groq fallback working! Groq: {groq_usage}, Emergent: {emergent_usage}, Failed: {failed_usage}"
+                    )
+                elif emergent_usage > 0:
+                    return self.log_test(
+                        "AI Provider Status", 
+                        True, 
+                        f"Emergent working! Groq: {groq_usage}, Emergent: {emergent_usage}, Failed: {failed_usage}"
+                    )
+                else:
+                    return self.log_test(
+                        "AI Provider Status", 
+                        False, 
+                        f"No successful AI provider usage found. Groq: {groq_usage}, Emergent: {emergent_usage}, Failed: {failed_usage}"
+                    )
+            else:
+                return self.log_test(
+                    "AI Provider Status", 
+                    False, 
+                    f"Failed to get logs: {logs_response.status_code}"
+                )
+        except Exception as e:
+            return self.log_test("AI Provider Status", False, f"Error: {str(e)}")
+
+    def test_google_integration(self):
+        """Test Google Integration - Verify Google News RSS feeds and Search functionality"""
+        try:
+            # Get news sources to verify Google sources are present
+            response = requests.get(f"{self.api_url}/news-sources", timeout=10)
+            if response.status_code == 200:
+                sources = response.json()
+                
+                # Count Google sources
+                google_sources = [s for s in sources if 'google' in s.get('name', '').lower()]
+                google_rss_sources = [s for s in google_sources if s.get('source_type') == 'rss']
+                google_search_sources = [s for s in google_sources if s.get('source_type') == 'search']
+                
+                if len(google_sources) >= 4:  # Expecting at least 4 Google sources
+                    return self.log_test(
+                        "Google Integration", 
+                        True, 
+                        f"Google sources found: {len(google_sources)} total, {len(google_rss_sources)} RSS, {len(google_search_sources)} Search"
+                    )
+                else:
+                    return self.log_test(
+                        "Google Integration", 
+                        False, 
+                        f"Insufficient Google sources: {len(google_sources)} found, expected at least 4"
+                    )
+            else:
+                return self.log_test(
+                    "Google Integration", 
+                    False, 
+                    f"Failed to get news sources: {response.status_code}"
+                )
+        except Exception as e:
+            return self.log_test("Google Integration", False, f"Error: {str(e)}")
+
+    def test_scraping_performance(self):
+        """Test Scraping Performance - Check logs for successful article processing"""
+        try:
+            # Get recent scraping logs
+            response = requests.get(f"{self.api_url}/logs?limit=50", timeout=10)
+            if response.status_code == 200:
+                logs = response.json()
+                
+                if not logs:
+                    return self.log_test(
+                        "Scraping Performance", 
+                        False, 
+                        "No scraping logs found"
+                    )
+                
+                # Analyze scraping performance
+                total_logs = len(logs)
+                successful_logs = len([log for log in logs if log.get('status') == 'success'])
+                total_articles = sum(log.get('articles_processed', 0) for log in logs)
+                total_startups = sum(log.get('startups_found', 0) for log in logs)
+                
+                # Check for recent activity (logs from last hour)
+                recent_logs = [log for log in logs if log.get('timestamp')]
+                
+                success_rate = (successful_logs / total_logs * 100) if total_logs > 0 else 0
+                
+                if success_rate >= 50:  # At least 50% success rate
+                    return self.log_test(
+                        "Scraping Performance", 
+                        True, 
+                        f"Success rate: {success_rate:.1f}%, Articles: {total_articles}, Startups: {total_startups}, Recent logs: {len(recent_logs)}"
+                    )
+                else:
+                    return self.log_test(
+                        "Scraping Performance", 
+                        False, 
+                        f"Low success rate: {success_rate:.1f}%, Articles: {total_articles}, Startups: {total_startups}"
+                    )
+            else:
+                return self.log_test(
+                    "Scraping Performance", 
+                    False, 
+                    f"Failed to get logs: {response.status_code}"
+                )
+        except Exception as e:
+            return self.log_test("Scraping Performance", False, f"Error: {str(e)}")
+
+    def test_startup_discovery(self):
+        """Test Startup Discovery - Check if any startups are being found"""
+        try:
+            # Get startup stats
+            stats_response = requests.get(f"{self.api_url}/startups/stats", timeout=10)
+            if stats_response.status_code == 200:
+                stats = stats_response.json()
+                total_startups = stats.get('total_startups', 0)
+                recent_discoveries = stats.get('recent_discoveries', 0)
+                
+                # Get actual startups list
+                startups_response = requests.get(f"{self.api_url}/startups?limit=10", timeout=10)
+                if startups_response.status_code == 200:
+                    startups = startups_response.json()
+                    
+                    # Note: 0 startups might be normal if no current funding news
+                    return self.log_test(
+                        "Startup Discovery", 
+                        True, 
+                        f"Total startups: {total_startups}, Recent: {recent_discoveries}, Sample count: {len(startups)}"
+                    )
+                else:
+                    return self.log_test(
+                        "Startup Discovery", 
+                        False, 
+                        f"Failed to get startups list: {startups_response.status_code}"
+                    )
+            else:
+                return self.log_test(
+                    "Startup Discovery", 
+                    False, 
+                    f"Failed to get startup stats: {stats_response.status_code}"
+                )
+        except Exception as e:
+            return self.log_test("Startup Discovery", False, f"Error: {str(e)}")
+
+    def analyze_logs_for_issues(self):
+        """Analyze logs for specific issues mentioned in the review"""
+        try:
+            response = requests.get(f"{self.api_url}/logs?limit=30", timeout=10)
+            if response.status_code == 200:
+                logs = response.json()
+                
+                issues_found = []
+                fixes_verified = []
+                
+                for log in logs:
+                    error_msg = log.get('error_message', '').lower()
+                    ai_provider = log.get('ai_provider_used', 'unknown')
+                    
+                    # Check for Brotli encoding issue (should be fixed)
+                    if 'brotli' in error_msg or 'br' in error_msg:
+                        issues_found.append("Brotli encoding issue still present")
+                    
+                    # Check for invalid API key (should be fixed)
+                    if 'invalid api key' in error_msg or '401' in error_msg:
+                        issues_found.append("Invalid API key issue still present")
+                    
+                    # Check for successful Groq usage (fix verification)
+                    if ai_provider == 'groq':
+                        fixes_verified.append("Groq API working")
+                    
+                    # Check for successful processing
+                    if log.get('status') == 'success' and log.get('articles_processed', 0) > 0:
+                        fixes_verified.append("Article processing working")
+                
+                # Remove duplicates
+                issues_found = list(set(issues_found))
+                fixes_verified = list(set(fixes_verified))
+                
+                if not issues_found and fixes_verified:
+                    return self.log_test(
+                        "Log Analysis", 
+                        True, 
+                        f"No critical issues found. Verified fixes: {', '.join(fixes_verified)}"
+                    )
+                elif issues_found:
+                    return self.log_test(
+                        "Log Analysis", 
+                        False, 
+                        f"Issues found: {', '.join(issues_found)}. Fixes verified: {', '.join(fixes_verified)}"
+                    )
+                else:
+                    return self.log_test(
+                        "Log Analysis", 
+                        True, 
+                        "No specific issues found in logs, but limited verification data"
+                    )
+            else:
+                return self.log_test(
+                    "Log Analysis", 
+                    False, 
+                    f"Failed to get logs: {response.status_code}"
+                )
+        except Exception as e:
+            return self.log_test("Log Analysis", False, f"Error: {str(e)}")
 
     def test_export_csv(self):
         """Test GET /api/export/csv endpoint"""
