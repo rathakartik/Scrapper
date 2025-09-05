@@ -564,25 +564,46 @@ class StartupFundingTrackerTester:
 
     def run_all_tests(self):
         """Run all backend API tests"""
-        print("🚀 Starting Startup Funding Tracker Backend API Tests")
+        print("🚀 Starting Enhanced Startup Funding Tracker Backend Tests")
         print(f"🔗 Testing API at: {self.api_url}")
         print("=" * 60)
         
         # Core API tests - Start with health check
         self.test_health_check()
         self.test_api_root()
+        
+        # Enhanced verification tests for the fixes
+        print("\n🔍 VERIFICATION TESTS FOR RECENT FIXES")
+        print("-" * 40)
+        self.test_google_integration()
+        self.test_startup_discovery()
+        
+        # Standard API tests
+        print("\n📋 STANDARD API TESTS")
+        print("-" * 40)
         self.test_get_startups()
         self.test_get_startups_with_filters()
         self.test_get_startup_stats()
         self.test_get_news_sources()
         self.test_create_news_source()
+        
+        # Scraping and AI tests
+        print("\n🤖 AI & SCRAPING TESTS")
+        print("-" * 40)
         self.test_trigger_manual_scrape()
         
-        # Wait a bit for scraping to potentially start
-        print("\n⏳ Waiting 5 seconds for scraping to process...")
-        time.sleep(5)
+        # Wait for scraping to process
+        print("\n⏳ Waiting 15 seconds for scraping and AI analysis...")
+        time.sleep(15)
         
         self.test_get_scraping_logs()
+        self.test_ai_provider_status()
+        self.test_scraping_performance()
+        self.analyze_logs_for_issues()
+        
+        # Additional tests
+        print("\n🔧 ADDITIONAL TESTS")
+        print("-" * 40)
         self.test_export_csv()
         self.test_cors_headers()
         
@@ -591,7 +612,7 @@ class StartupFundingTrackerTester:
         
         # Print summary
         print("\n" + "=" * 60)
-        print("📊 TEST SUMMARY")
+        print("📊 COMPREHENSIVE TEST SUMMARY")
         print("=" * 60)
         print(f"Total Tests: {self.tests_run}")
         print(f"Passed: {self.tests_passed}")
@@ -603,6 +624,14 @@ class StartupFundingTrackerTester:
         if failed_tests:
             print("\n❌ FAILED TESTS:")
             for test in failed_tests:
+                print(f"  - {test['name']}: {test['message']}")
+        
+        # Print successful verification tests
+        verification_tests = [test for test in self.test_results if test['success'] and 
+                            test['name'] in ['AI Provider Status', 'Google Integration', 'Scraping Performance', 'Log Analysis']]
+        if verification_tests:
+            print("\n✅ VERIFIED FIXES:")
+            for test in verification_tests:
                 print(f"  - {test['name']}: {test['message']}")
         
         return self.tests_passed == self.tests_run
