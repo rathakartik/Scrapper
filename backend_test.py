@@ -33,6 +33,36 @@ class StartupFundingTrackerTester:
         print(f"{status} - {name}: {message}")
         return success
 
+    def test_health_check(self):
+        """Test API health check endpoint - CRITICAL TEST"""
+        try:
+            response = requests.get(f"{self.api_url}/health", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                status = data.get('status', 'unknown')
+                database = data.get('database', 'unknown')
+                
+                if status == 'healthy' and database == 'connected':
+                    return self.log_test(
+                        "API Health Check", 
+                        True, 
+                        f"Status: {status}, Database: {database}, Timestamp: {data.get('timestamp', 'N/A')}"
+                    )
+                else:
+                    return self.log_test(
+                        "API Health Check", 
+                        False, 
+                        f"Unhealthy - Status: {status}, Database: {database}, Error: {data.get('error', 'N/A')}"
+                    )
+            else:
+                return self.log_test(
+                    "API Health Check", 
+                    False, 
+                    f"Expected 200, got {response.status_code}"
+                )
+        except Exception as e:
+            return self.log_test("API Health Check", False, f"Error: {str(e)}")
+
     def test_api_root(self):
         """Test API root endpoint"""
         try:
