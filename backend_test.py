@@ -326,7 +326,8 @@ class StartupFundingTrackerTester:
         print(f"🔗 Testing API at: {self.api_url}")
         print("=" * 60)
         
-        # Core API tests
+        # Core API tests - Start with health check
+        self.test_health_check()
         self.test_api_root()
         self.test_get_startups()
         self.test_get_startups_with_filters()
