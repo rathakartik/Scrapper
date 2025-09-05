@@ -27,3 +27,4 @@ emergentintegrations
 beautifulsoup4>=4.12.0
 aiohttp>=3.9.0
 lxml>=4.9.0
+groq>=0.31.0
