@@ -447,7 +447,8 @@ class StartupFundingTrackerTester:
                 fixes_verified = []
                 
                 for log in logs:
-                    error_msg = log.get('error_message', '').lower()
+                    error_msg = log.get('error_message', '') or ''
+                    error_msg = error_msg.lower() if error_msg else ''
                     ai_provider = log.get('ai_provider_used', 'unknown')
                     
                     # Check for Brotli encoding issue (should be fixed)
