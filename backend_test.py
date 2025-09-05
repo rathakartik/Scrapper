@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 class StartupFundingTrackerTester:
-    def __init__(self, base_url="https://hungry-rhodes-1.preview.emergentagent.com"):
+    def __init__(self, base_url="https://source-integration.preview.emergentagent.com"):
         self.base_url = base_url
         self.api_url = f"{base_url}/api"
         self.tests_run = 0
